@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -36,19 +36,69 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept licenses and install Android packages
+      - name: Install Android 17 SDK and pinned NDK
         shell: bash
         run: |
           set -euo pipefail
 
           yes | sdkmanager --licenses >/dev/null || true
 
-          sdkmanager             "platform-tools"             "platforms;android-37"             "build-tools;37.0.0"             "ndk;27.3.13750724"
+          # Android 17 / API 37 is currently a preview SDK.
+          # Channel 3 makes stable, beta, dev, and canary packages visible.
+          sdkmanager --install "cmdline-tools;latest" --channel=3
+
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+
+          echo "Looking for Android API 37..."
+          if ! sdkmanager --list --channel=3 | grep -q "platforms;android-37"; then
+            echo "ERROR: platforms;android-37 is still not visible."
+            echo "Relevant packages returned by sdkmanager:"
+            sdkmanager --list --channel=3 |
+              grep -E "platforms;android-3[67]|build-tools;3[67]" |
+              head -100 || true
+            exit 1
+          fi
+
+          # Select the newest available 37.x build-tools package rather than
+          # assuming a specific preview revision.
+          BUILD_TOOLS_PACKAGE="$(
+            sdkmanager --list --channel=3 |
+            awk -F'|' '
+              /^[[:space:]]*build-tools;37\./ {
+                package=$1
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", package)
+                print package
+              }
+            ' |
+            sort -V |
+            tail -n 1
+          )"
+
+          if [ -z "${BUILD_TOOLS_PACKAGE:-}" ]; then
+            echo "ERROR: No Android 37 build-tools package is visible."
+            sdkmanager --list --channel=3 |
+              grep -E "build-tools;3[67]" |
+              head -100 || true
+            exit 1
+          fi
+
+          echo "Installing:"
+          echo "  platforms;android-37"
+          echo "  $BUILD_TOOLS_PACKAGE"
+          echo "  ndk;27.3.13750724"
+
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-37" \
+            "$BUILD_TOOLS_PACKAGE" \
+            --channel=3
+
+          sdkmanager --install "ndk;27.3.13750724"
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Verify project files
+      - name: Verify project and Android toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -58,22 +108,32 @@ jobs:
           test -f app/build.gradle
           test -f gradlew
           test -f gradle/wrapper/gradle-wrapper.properties
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37"
+          test -d "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
+
+          chmod +x gradlew
 
           echo "Gradle wrapper:"
           cat gradle/wrapper/gradle-wrapper.properties
 
           echo
-          echo "Installed Android packages:"
-          sdkmanager --list_installed
+          echo "Gradle version:"
+          ./gradlew --version
+
+          echo
+          echo "Installed Android 37 files:"
+          ls -la "$ANDROID_SDK_ROOT/platforms/android-37" | head -50
 
       - name: Build Stormline debug APK
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x gradlew
-
-          ./gradlew             --no-daemon             --stacktrace             clean             assembleDebug
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            clean \
+            assembleDebug
 
       - name: Collect APK
         shell: bash
@@ -94,7 +154,8 @@ jobs:
           mkdir -p apk-output
           cp "$APK_FILE" apk-output/Stormline-debug.apk
 
-          sha256sum apk-output/Stormline-debug.apk             > apk-output/Stormline-debug.apk.sha256
+          sha256sum apk-output/Stormline-debug.apk \
+            > apk-output/Stormline-debug.apk.sha256
 
           ls -lh apk-output/
 
@@ -108,7 +169,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build reports after failure
+      - name: Upload useful diagnostics after failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -116,5 +177,7 @@ jobs:
           path: |
             app/build/reports/**
             app/build/outputs/logs/**
+            app/.cxx/**/build_command.txt
+            app/.cxx/**/android_gradle_build.json
           if-no-files-found: ignore
           retention-days: 7
