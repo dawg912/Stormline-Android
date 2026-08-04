@@ -118,4 +118,3 @@ jobs:
             app/build/outputs/logs/**
           if-no-files-found: ignore
           retention-days: 7
-
