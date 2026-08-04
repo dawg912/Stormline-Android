@@ -31,10 +31,7 @@ jobs:
           EXTRACT_DIR="$RUNNER_TEMP/stormline-project"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: Missing project ZIP:"
-            echo "$ZIP_FILE"
-            echo
-            echo "Repository files:"
+            echo "ERROR: Missing project ZIP: $ZIP_FILE"
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print | sort
             exit 1
           fi
@@ -53,26 +50,21 @@ jobs:
           )"
 
           if [ -z "${SETTINGS_FILE:-}" ]; then
-            echo "ERROR: Could not find settings.gradle after extraction."
+            echo "ERROR: Could not locate settings.gradle after extraction."
             find "$EXTRACT_DIR" -maxdepth 4 -print | sort | head -300
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
-          test -f "$PROJECT_DIR/build.gradle" || test -f "$PROJECT_DIR/build.gradle.kts"
-          test -d "$PROJECT_DIR/app"
-          test -f "$PROJECT_DIR/app/build.gradle" || test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle"
           test -f "$PROJECT_DIR/gradlew"
           test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Using project:"
-          echo "$PROJECT_DIR"
-
-          echo
-          echo "Project root:"
+          echo "Using project: $PROJECT_DIR"
           find "$PROJECT_DIR" -maxdepth 2 -print | sort | head -200
 
       - name: Set up Java 17
@@ -97,7 +89,7 @@ jobs:
             "build-tools;36.0.0" \
             "ndk;27.3.13750724"
 
-      - name: Configure stable API 36
+      - name: Configure API 36 compatible build
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -105,23 +97,21 @@ jobs:
 
           APP_GRADLE="app/build.gradle"
 
-          if [ ! -f "$APP_GRADLE" ]; then
-            echo "ERROR: This workflow expects app/build.gradle."
-            exit 1
-          fi
-
-          # The app does not use Android 17-only APIs, so CI builds against
-          # stable API 36 instead of the API 37 preview SDK.
+          # The app source does not use Android 17-only APIs. Build against the
+          # stable API 36 SDK, and use the final Core KTX release compatible
+          # with API 36 instead of Core KTX 1.19.0, which requires API 37.
           sed -i \
             -e 's/compileSdk = 37/compileSdk = 36/' \
             -e 's/targetSdkVersion 37/targetSdkVersion 36/' \
+            -e "s/androidx\.core:core-ktx:1\.19\.0/androidx.core:core-ktx:1.18.0/" \
             "$APP_GRADLE"
 
-          echo "Android configuration used by CI:"
-          grep -nE 'compileSdk|targetSdkVersion|ndkVersion' "$APP_GRADLE"
+          echo "CI Android configuration:"
+          grep -nE 'compileSdk|targetSdkVersion|ndkVersion|core-ktx' "$APP_GRADLE"
 
           grep -q 'compileSdk = 36' "$APP_GRADLE"
           grep -q 'targetSdkVersion 36' "$APP_GRADLE"
+          grep -q 'androidx.core:core-ktx:1.18.0' "$APP_GRADLE"
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
@@ -142,15 +132,7 @@ jobs:
           cat gradle/wrapper/gradle-wrapper.properties
 
           echo
-          echo "Gradle version:"
           ./gradlew --version
-
-          echo
-          echo "Installed Android packages:"
-          ls -ld \
-            "$ANDROID_SDK_ROOT/platforms/android-36" \
-            "$ANDROID_SDK_ROOT/build-tools/36.0.0" \
-            "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
 
       - name: Build Stormline debug APK
         shell: bash
@@ -161,6 +143,7 @@ jobs:
           ./gradlew \
             --no-daemon \
             --stacktrace \
+            --warning-mode all \
             clean \
             assembleDebug
 
@@ -172,10 +155,7 @@ jobs:
           APK_FILE="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK_FILE" ]; then
-            echo "ERROR: Expected APK was not created:"
-            echo "$APK_FILE"
-            echo
-            echo "APK files found:"
+            echo "ERROR: Expected APK was not created: $APK_FILE"
             find "$PROJECT_DIR" -type f -name "*.apk" -print || true
             exit 1
           fi
@@ -185,7 +165,6 @@ jobs:
           mkdir -p "$OUTPUT_DIR"
 
           cp "$APK_FILE" "$OUTPUT_DIR/Stormline-debug.apk"
-
           sha256sum "$OUTPUT_DIR/Stormline-debug.apk" \
             > "$OUTPUT_DIR/Stormline-debug.apk.sha256"
 
