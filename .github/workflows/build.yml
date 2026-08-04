@@ -6,12 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "app/**"
-      - "gradle/**"
-      - "build.gradle"
-      - "settings.gradle"
-      - "gradle.properties"
-      - "gradlew"
+      - "Stormline-1.0.0-source.zip"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -26,6 +21,59 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Extract Stormline project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$GITHUB_WORKSPACE/Stormline-1.0.0-source.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/stormline-project"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: Missing project ZIP:"
+            echo "$ZIP_FILE"
+            echo
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print | sort
+            exit 1
+          fi
+
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+          SETTINGS_FILE="$(
+            find "$EXTRACT_DIR" \
+              -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -print |
+            sort |
+            head -n 1
+          )"
+
+          if [ -z "${SETTINGS_FILE:-}" ]; then
+            echo "ERROR: Could not find settings.gradle after extraction."
+            find "$EXTRACT_DIR" -maxdepth 4 -print | sort | head -300
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+
+          test -f "$PROJECT_DIR/build.gradle" || test -f "$PROJECT_DIR/build.gradle.kts"
+          test -d "$PROJECT_DIR/app"
+          test -f "$PROJECT_DIR/app/build.gradle" || test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/gradlew"
+          test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Using project:"
+          echo "$PROJECT_DIR"
+
+          echo
+          echo "Project root:"
+          find "$PROJECT_DIR" -maxdepth 2 -print | sort | head -200
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -49,39 +97,40 @@ jobs:
             "build-tools;36.0.0" \
             "ndk;27.3.13750724"
 
-      - name: Use stable API 36 for CI build
+      - name: Configure stable API 36
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
-          # Stormline does not use Android 17-only APIs. The uploaded project
-          # was configured for preview API 37, whose package currently fails
-          # to install reliably on GitHub's headless runner. Build against the
-          # stable API 36 SDK instead.
+          APP_GRADLE="app/build.gradle"
+
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "ERROR: This workflow expects app/build.gradle."
+            exit 1
+          fi
+
+          # The app does not use Android 17-only APIs, so CI builds against
+          # stable API 36 instead of the API 37 preview SDK.
           sed -i \
             -e 's/compileSdk = 37/compileSdk = 36/' \
             -e 's/targetSdkVersion 37/targetSdkVersion 36/' \
-            app/build.gradle
+            "$APP_GRADLE"
 
           echo "Android configuration used by CI:"
-          grep -nE 'compileSdk|targetSdkVersion|ndkVersion' app/build.gradle
+          grep -nE 'compileSdk|targetSdkVersion|ndkVersion' "$APP_GRADLE"
 
-          grep -q 'compileSdk = 36' app/build.gradle
-          grep -q 'targetSdkVersion 36' app/build.gradle
+          grep -q 'compileSdk = 36' "$APP_GRADLE"
+          grep -q 'targetSdkVersion 36' "$APP_GRADLE"
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Verify project and toolchain
+      - name: Verify toolchain
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-
-          test -f settings.gradle
-          test -f build.gradle
-          test -f app/build.gradle
-          test -f gradlew
-          test -f gradle/wrapper/gradle-wrapper.properties
 
           test -d "$ANDROID_SDK_ROOT/platforms/android-36"
           test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
@@ -105,6 +154,7 @@ jobs:
 
       - name: Build Stormline debug APK
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
@@ -119,24 +169,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          APK_FILE="app/build/outputs/apk/debug/app-debug.apk"
+          APK_FILE="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -f "$APK_FILE" ]; then
             echo "ERROR: Expected APK was not created:"
             echo "$APK_FILE"
             echo
             echo "APK files found:"
-            find . -type f -name "*.apk" -print || true
+            find "$PROJECT_DIR" -type f -name "*.apk" -print || true
             exit 1
           fi
 
-          mkdir -p apk-output
-          cp "$APK_FILE" apk-output/Stormline-debug.apk
+          OUTPUT_DIR="$GITHUB_WORKSPACE/apk-output"
+          rm -rf "$OUTPUT_DIR"
+          mkdir -p "$OUTPUT_DIR"
 
-          sha256sum apk-output/Stormline-debug.apk \
-            > apk-output/Stormline-debug.apk.sha256
+          cp "$APK_FILE" "$OUTPUT_DIR/Stormline-debug.apk"
 
-          ls -lh apk-output/
+          sha256sum "$OUTPUT_DIR/Stormline-debug.apk" \
+            > "$OUTPUT_DIR/Stormline-debug.apk.sha256"
+
+          ls -lh "$OUTPUT_DIR"
 
       - name: Upload Stormline APK
         uses: actions/upload-artifact@v4
@@ -154,12 +207,12 @@ jobs:
         with:
           name: Stormline-Build-Failure
           path: |
-            app/build/reports/**
-            app/build/outputs/logs/**
-            app/.cxx/**/build_command.txt
-            app/.cxx/**/android_gradle_build.json
-            app/build.gradle
-            build.gradle
-            gradle/wrapper/gradle-wrapper.properties
+            ${{ env.PROJECT_DIR }}/app/build/reports/**
+            ${{ env.PROJECT_DIR }}/app/build/outputs/logs/**
+            ${{ env.PROJECT_DIR }}/app/.cxx/**/build_command.txt
+            ${{ env.PROJECT_DIR }}/app/.cxx/**/android_gradle_build.json
+            ${{ env.PROJECT_DIR }}/app/build.gradle
+            ${{ env.PROJECT_DIR }}/build.gradle
+            ${{ env.PROJECT_DIR }}/gradle/wrapper/gradle-wrapper.properties
           if-no-files-found: ignore
           retention-days: 7
