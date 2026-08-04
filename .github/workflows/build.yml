@@ -36,109 +36,43 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install current command-line tools
+      - name: Install stable Android SDK and pinned NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          BOOTSTRAP_SDKMANAGER="$(command -v sdkmanager)"
+          yes | sdkmanager --licenses >/dev/null || true
 
-          echo "Bootstrap sdkmanager:"
-          echo "$BOOTSTRAP_SDKMANAGER"
-          "$BOOTSTRAP_SDKMANAGER" --version || true
-
-          yes | "$BOOTSTRAP_SDKMANAGER" --licenses >/dev/null || true
-
-          # API 37 is currently on a preview channel. First use the runner's
-          # sdkmanager only to download a current command-line tools package.
-          "$BOOTSTRAP_SDKMANAGER" \
-            --install "cmdline-tools;latest" \
-            --channel=3
-
-          # setup-android already contains a directory named "latest", so the
-          # newly downloaded package may be installed as latest-2/latest-3.
-          # Select the most recently written sdkmanager explicitly.
-          SDKMANAGER="$(
-            find "$ANDROID_SDK_ROOT/cmdline-tools" \
-              -type f \
-              -path "*/bin/sdkmanager" \
-              -printf '%T@ %p\n' |
-            sort -nr |
-            head -n 1 |
-            cut -d' ' -f2-
-          )"
-
-          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "ERROR: Could not locate the newly installed sdkmanager."
-            find "$ANDROID_SDK_ROOT/cmdline-tools" -maxdepth 4 -print | sort
-            exit 1
-          fi
-
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-          echo
-          echo "Current sdkmanager selected:"
-          echo "$SDKMANAGER"
-          "$SDKMANAGER" --version
-
-      - name: Install Android 17 SDK and pinned NDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          echo "Looking for Android API 37..."
-
-          if ! "$SDKMANAGER" --list --channel=3 |
-               grep -q "platforms;android-37"; then
-            echo "ERROR: platforms;android-37 is not visible."
-            echo
-            echo "Relevant packages:"
-            "$SDKMANAGER" --list --channel=3 |
-              grep -E "platforms;android-3[67]|build-tools;3[67]" |
-              head -100 || true
-            exit 1
-          fi
-
-          BUILD_TOOLS_PACKAGE="$(
-            "$SDKMANAGER" --list --channel=3 |
-            awk -F'|' '
-              /^[[:space:]]*build-tools;37\./ {
-                package=$1
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", package)
-                print package
-              }
-            ' |
-            sort -V |
-            tail -n 1
-          )"
-
-          if [ -z "${BUILD_TOOLS_PACKAGE:-}" ]; then
-            echo "ERROR: No Android 37 build-tools package is visible."
-            "$SDKMANAGER" --list --channel=3 |
-              grep -E "build-tools;3[67]" |
-              head -100 || true
-            exit 1
-          fi
-
-          echo "Installing:"
-          echo "  platform-tools"
-          echo "  platforms;android-37"
-          echo "  $BUILD_TOOLS_PACKAGE"
-          echo "  ndk;27.3.13750724"
-
-          "$SDKMANAGER" --install \
+          sdkmanager \
             "platform-tools" \
-            "platforms;android-37" \
-            "$BUILD_TOOLS_PACKAGE" \
-            "ndk;27.3.13750724" \
-            --channel=3
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.3.13750724"
+
+      - name: Use stable API 36 for CI build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Stormline does not use Android 17-only APIs. The uploaded project
+          # was configured for preview API 37, whose package currently fails
+          # to install reliably on GitHub's headless runner. Build against the
+          # stable API 36 SDK instead.
+          sed -i \
+            -e 's/compileSdk = 37/compileSdk = 36/' \
+            -e 's/targetSdkVersion 37/targetSdkVersion 36/' \
+            app/build.gradle
+
+          echo "Android configuration used by CI:"
+          grep -nE 'compileSdk|targetSdkVersion|ndkVersion' app/build.gradle
+
+          grep -q 'compileSdk = 36' app/build.gradle
+          grep -q 'targetSdkVersion 36' app/build.gradle
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Verify project and Android toolchain
+      - name: Verify project and toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -148,7 +82,9 @@ jobs:
           test -f app/build.gradle
           test -f gradlew
           test -f gradle/wrapper/gradle-wrapper.properties
-          test -d "$ANDROID_SDK_ROOT/platforms/android-37"
+
+          test -d "$ANDROID_SDK_ROOT/platforms/android-36"
+          test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
           test -d "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
 
           chmod +x gradlew
@@ -161,17 +97,11 @@ jobs:
           ./gradlew --version
 
           echo
-          echo "Installed Android 37 platform:"
-          ls -la "$ANDROID_SDK_ROOT/platforms/android-37" | head -50
-
-          echo
-          echo "Installed Android 37 build tools:"
-          find "$ANDROID_SDK_ROOT/build-tools" \
-            -mindepth 1 -maxdepth 1 -type d -name "37*" -print | sort
-
-          echo
-          echo "Installed NDK:"
-          ls -ld "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
+          echo "Installed Android packages:"
+          ls -ld \
+            "$ANDROID_SDK_ROOT/platforms/android-36" \
+            "$ANDROID_SDK_ROOT/build-tools/36.0.0" \
+            "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
 
       - name: Build Stormline debug APK
         shell: bash
@@ -228,5 +158,8 @@ jobs:
             app/build/outputs/logs/**
             app/.cxx/**/build_command.txt
             app/.cxx/**/android_gradle_build.json
+            app/build.gradle
+            build.gradle
+            gradle/wrapper/gradle-wrapper.properties
           if-no-files-found: ignore
           retention-days: 7
