@@ -36,33 +36,73 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install current command-line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BOOTSTRAP_SDKMANAGER="$(command -v sdkmanager)"
+
+          echo "Bootstrap sdkmanager:"
+          echo "$BOOTSTRAP_SDKMANAGER"
+          "$BOOTSTRAP_SDKMANAGER" --version || true
+
+          yes | "$BOOTSTRAP_SDKMANAGER" --licenses >/dev/null || true
+
+          # API 37 is currently on a preview channel. First use the runner's
+          # sdkmanager only to download a current command-line tools package.
+          "$BOOTSTRAP_SDKMANAGER" \
+            --install "cmdline-tools;latest" \
+            --channel=3
+
+          # setup-android already contains a directory named "latest", so the
+          # newly downloaded package may be installed as latest-2/latest-3.
+          # Select the most recently written sdkmanager explicitly.
+          SDKMANAGER="$(
+            find "$ANDROID_SDK_ROOT/cmdline-tools" \
+              -type f \
+              -path "*/bin/sdkmanager" \
+              -printf '%T@ %p\n' |
+            sort -nr |
+            head -n 1 |
+            cut -d' ' -f2-
+          )"
+
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: Could not locate the newly installed sdkmanager."
+            find "$ANDROID_SDK_ROOT/cmdline-tools" -maxdepth 4 -print | sort
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo
+          echo "Current sdkmanager selected:"
+          echo "$SDKMANAGER"
+          "$SDKMANAGER" --version
+
       - name: Install Android 17 SDK and pinned NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
-
-          # Android 17 / API 37 is currently a preview SDK.
-          # Channel 3 makes stable, beta, dev, and canary packages visible.
-          sdkmanager --install "cmdline-tools;latest" --channel=3
-
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
 
           echo "Looking for Android API 37..."
-          if ! sdkmanager --list --channel=3 | grep -q "platforms;android-37"; then
-            echo "ERROR: platforms;android-37 is still not visible."
-            echo "Relevant packages returned by sdkmanager:"
-            sdkmanager --list --channel=3 |
+
+          if ! "$SDKMANAGER" --list --channel=3 |
+               grep -q "platforms;android-37"; then
+            echo "ERROR: platforms;android-37 is not visible."
+            echo
+            echo "Relevant packages:"
+            "$SDKMANAGER" --list --channel=3 |
               grep -E "platforms;android-3[67]|build-tools;3[67]" |
               head -100 || true
             exit 1
           fi
 
-          # Select the newest available 37.x build-tools package rather than
-          # assuming a specific preview revision.
           BUILD_TOOLS_PACKAGE="$(
-            sdkmanager --list --channel=3 |
+            "$SDKMANAGER" --list --channel=3 |
             awk -F'|' '
               /^[[:space:]]*build-tools;37\./ {
                 package=$1
@@ -76,24 +116,24 @@ jobs:
 
           if [ -z "${BUILD_TOOLS_PACKAGE:-}" ]; then
             echo "ERROR: No Android 37 build-tools package is visible."
-            sdkmanager --list --channel=3 |
+            "$SDKMANAGER" --list --channel=3 |
               grep -E "build-tools;3[67]" |
               head -100 || true
             exit 1
           fi
 
           echo "Installing:"
+          echo "  platform-tools"
           echo "  platforms;android-37"
           echo "  $BUILD_TOOLS_PACKAGE"
           echo "  ndk;27.3.13750724"
 
-          sdkmanager --install \
+          "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-37" \
             "$BUILD_TOOLS_PACKAGE" \
+            "ndk;27.3.13750724" \
             --channel=3
-
-          sdkmanager --install "ndk;27.3.13750724"
 
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v4
@@ -121,8 +161,17 @@ jobs:
           ./gradlew --version
 
           echo
-          echo "Installed Android 37 files:"
+          echo "Installed Android 37 platform:"
           ls -la "$ANDROID_SDK_ROOT/platforms/android-37" | head -50
+
+          echo
+          echo "Installed Android 37 build tools:"
+          find "$ANDROID_SDK_ROOT/build-tools" \
+            -mindepth 1 -maxdepth 1 -type d -name "37*" -print | sort
+
+          echo
+          echo "Installed NDK:"
+          ls -ld "$ANDROID_SDK_ROOT/ndk/27.3.13750724"
 
       - name: Build Stormline debug APK
         shell: bash
